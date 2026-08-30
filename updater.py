@@ -388,7 +388,7 @@ def check_for_update():
     print('Checking for Cats update...')
 
     # Get all releases from Github
-    if not get_github_releases('teamneoneko'):
+    if not get_github_releases(RELEASES_API_URL):
         finish_update_checking(error=t('check_for_update.cantCheck'))
         return
 
@@ -407,6 +407,13 @@ def check_for_update():
 
     # Finish update checking, update the UI
     finish_update_checking()
+
+
+# Where this build looks for updates. This fork ships its own fixes, so it must not offer to
+# "update" users onto an unrelated upstream build that would overwrite them.
+RELEASES_API_URL = 'https://api.github.com/repos/alienware377/Cats-Blender-Plugin-5.1-fixes/releases'
+DEV_BRANCH_ZIP_URL = ('https://github.com/alienware377/Cats-Blender-Plugin-5.1-fixes'
+                      '/archive/refs/heads/main.zip')
 
 
 def get_github_releases(repo):
@@ -428,11 +435,13 @@ def get_github_releases(repo):
         return True
 
     try:
-        ssl._create_default_https_context = ssl._create_unverified_context
-        with urllib.request.urlopen('https://git.disroot.org/api/v1/repos/Neoneko/Cats-Blender-Plugin/releases') as url:
+        # NOTE: this used to set ssl._create_default_https_context = ssl._create_unverified_context,
+        # which disables certificate verification for *every* HTTPS request made by the whole
+        # Blender process, not just this one. Verified TLS is used instead.
+        with urllib.request.urlopen(RELEASES_API_URL, timeout=15) as url:
             data = json.loads(url.read().decode())
-    except urllib.error.URLError:
-        print('URL ERROR')
+    except (urllib.error.URLError, TimeoutError, ssl.SSLError) as e:
+        print('Cats updater: could not reach the release list:', e)
         return False
     if not data:
         return False
@@ -553,8 +562,7 @@ def update_now(version=None, latest=False, dev=False):
     if dev:
         print('UPDATE TO DEVELOPMENT')
         # Dynamically construct dev branch URL based on major version
-        major_version = CATS_VERSION.split('.')[0]
-        update_link = f'https://git.disroot.org/Neoneko/Cats-Blender-Plugin/archive/blender-{major_version}x-dev.zip'
+        update_link = DEV_BRANCH_ZIP_URL
     elif latest or not version:
         print('UPDATE TO ' + latest_version_str)
         update_link = version_list.get(latest_version_str)[0]
@@ -581,10 +589,11 @@ def download_file(update_url):
     # Download zip
     print('DOWNLOAD FILE')
     try:
-        ssl._create_default_https_context = ssl._create_unverified_context
+        # Certificate verification stays ON. The previous code disabled it globally for the whole
+        # Blender process, which silently weakened every other HTTPS request too.
         urllib.request.urlretrieve(update_url, update_zip_file)
-    except urllib.error.URLError:
-        print("FILE COULD NOT BE DOWNLOADED")
+    except (urllib.error.URLError, TimeoutError, ssl.SSLError) as e:
+        print("FILE COULD NOT BE DOWNLOADED:", e)
         shutil.rmtree(downloads_dir)
         finish_update(error=t('download_file.cantConnect'))
         return

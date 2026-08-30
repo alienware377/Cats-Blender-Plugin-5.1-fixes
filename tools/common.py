@@ -236,35 +236,80 @@ def unselect_all():
         select(obj, False)
 
 
+def in_view_layer(obj):
+    """True if obj is linked into the current view layer.
+
+    Objects that exist in the file but sit in no collection (or an excluded one) cannot be
+    selected, hidden or made active - every one of those calls raises. Blender files pick these up
+    routinely (leftovers from deleted collections, appended data, backup collections), and Cats used
+    to hard-crash on them mid-operation, leaving the model half-processed.
+    """
+    if obj is None:
+        return False
+    try:
+        return bpy.context.view_layer.objects.get(obj.name) == obj
+    except Exception:
+        return False
+
+
 def set_active(obj, skip_sel=False):
+    if obj is None or not in_view_layer(obj):
+        return False
     if not skip_sel:
         select(obj)
+    try:
         bpy.context.view_layer.objects.active = obj
+        return True
+    except Exception as e:
+        print('Cats: could not make %r active: %s' % (obj.name, e))
+        return False
 
 
 def select(obj, sel=True):
-    if obj is not None:
+    if obj is not None and in_view_layer(obj):
         hide(obj, False)
-        obj.select_set(sel)
-        
+        try:
+            obj.select_set(sel)
+        except RuntimeError as e:
+            print('Cats: could not select %r: %s' % (obj.name, e))
+
 
 def hide(obj, val=True):
+    if obj is None:
+        return
     if hasattr(obj, 'hide_set'):
-        obj.hide_set(val)
+        if not in_view_layer(obj):
+            return
+        try:
+            obj.hide_set(val)
+        except RuntimeError as e:
+            print('Cats: could not hide %r: %s' % (obj.name, e))
     elif hasattr(obj, 'hide'):
         obj.hide = val
 
 
 def is_hidden(obj):
+    if obj is None:
+        return False
     if hasattr(obj, 'hide_get'):
-        return obj.hide_get()
+        if not in_view_layer(obj):
+            return True
+        try:
+            return obj.hide_get()
+        except RuntimeError:
+            return True
     elif hasattr(obj, 'hide'):
         return obj.hide
     return False  # Return a default value if the hide state cannot be determined
 
 
 def set_unselectable(obj, val=True):
-    obj.hide_select = val
+    if obj is None:
+        return
+    try:
+        obj.hide_select = val
+    except Exception as e:
+        print('Cats: could not set hide_select on %r: %s' % (obj.name, e))
 
 
 def switch(new_mode, check_mode=True):
@@ -763,18 +808,27 @@ def get_meshes_objects(armature_name=None, mode=0, check=True, visible_only=Fals
                     meshes.append(ob)
 
     if visible_only:
-        for mesh in meshes:
-            if is_hidden(mesh):
-                meshes.remove(mesh)
+        # Filtering must not mutate the list being iterated - doing so skips every other match.
+        meshes = [mesh for mesh in meshes if not is_hidden(mesh)]
 
     # Check for broken meshes and delete them
     if check:
         current_active = context.view_layer.objects.active
+        view_layer_names = {o.name for o in context.view_layer.objects}
         to_remove = []
         for mesh in meshes:
+            # Objects that are not linked into this view layer (e.g. their collection is excluded)
+            # cannot be made active at all. They are perfectly valid data, not corruption, so leave
+            # them alone instead of raising - or worse, deleting them.
+            if mesh.name not in view_layer_names:
+                continue
             selected = mesh.select_get()
             # print(mesh.name, mesh.users)
-            set_active(mesh)
+            try:
+                set_active(mesh)
+            except Exception as e:
+                print('Cats get_meshes_objects: could not activate %r: %s' % (mesh.name, e))
+                continue
 
             if not context.view_layer.objects.active:
                 to_remove.append(mesh)

@@ -158,6 +158,9 @@ def start_pose_mode(reset_pose=True):
         pass
 
     armature = Common.set_default_stage()
+    if armature is None:
+        print('Cats start_pose_mode: no armature found')
+        return
     Common.remove_rigidbodies_global()
     Common.switch('POSE')
     armature.data.pose_position = 'POSE'
@@ -172,9 +175,16 @@ def start_pose_mode(reset_pose=True):
         pb.select = True
 
     if reset_pose:
-        bpy.ops.pose.rot_clear()
-        bpy.ops.pose.scale_clear()
-        bpy.ops.pose.transforms_clear()
+        if armature.mode == 'POSE':
+            for op in (bpy.ops.pose.rot_clear, bpy.ops.pose.scale_clear,
+                       bpy.ops.pose.transforms_clear):
+                try:
+                    op()
+                except RuntimeError as e:
+                    print('Cats start_pose_mode: %s skipped: %s' % (op.idname(), e))
+        else:
+            for pb in armature.pose.bones:
+                pb.matrix_basis.identity()
 
     bone = armature.data.bones.get(current)
     if bone is not None:
@@ -185,7 +195,10 @@ def start_pose_mode(reset_pose=True):
         for index, pb in enumerate(armature.pose.bones):
             if index != 0:
                 pb.select = False
-        bpy.ops.wm.tool_set_by_id(name="builtin.rotate")
+        try:
+            bpy.ops.wm.tool_set_by_id(name="builtin.rotate")
+        except RuntimeError as e:
+            print('Cats start_pose_mode: tool_set_by_id skipped:', e)
 
     saved_data.load(hide_only=True)
     Common.hide(armature, False)
@@ -230,19 +243,41 @@ class StopPoseModeNoReset(bpy.types.Operator):
 def stop_pose_mode(reset_pose=True):
     saved_data = Common.SavedData()
     armature = Common.get_armature()
+    if armature is None:
+        return
     Common.set_active(armature)
 
-    # Make all objects visible
-    bpy.ops.object.hide_view_clear()
+    # Make all objects visible. Needs an Object-mode 3D View context, which is not guaranteed when
+    # this is called from another operator, so never let it abort the rest of the cleanup.
+    try:
+        bpy.ops.object.hide_view_clear()
+    except RuntimeError as e:
+        print('Cats stop_pose_mode: hide_view_clear skipped:', e)
 
     for pb in armature.pose.bones:
         pb.hide = False
         pb.select = True
 
+    # The pose.* operators only poll in Pose mode. This function used to assume it was always
+    # entered from Pose mode and blew up with "context is incorrect" otherwise - which aborted the
+    # whole caller (including Apply as Rest Pose) after it had already changed the model.
     if reset_pose:
-        bpy.ops.pose.rot_clear()
-        bpy.ops.pose.scale_clear()
-        bpy.ops.pose.transforms_clear()
+        if armature.mode != 'POSE':
+            try:
+                Common.switch('POSE')
+            except Exception as e:
+                print('Cats stop_pose_mode: could not enter pose mode:', e)
+        if armature.mode == 'POSE':
+            for op in (bpy.ops.pose.rot_clear, bpy.ops.pose.scale_clear,
+                       bpy.ops.pose.transforms_clear):
+                try:
+                    op()
+                except RuntimeError as e:
+                    print('Cats stop_pose_mode: %s skipped: %s' % (op.idname(), e))
+        else:
+            # Fall back to clearing the pose through the data API, which needs no context at all.
+            for pb in armature.pose.bones:
+                pb.matrix_basis.identity()
 
     for pb in armature.pose.bones:
         pb.select = False
@@ -257,7 +292,10 @@ def stop_pose_mode(reset_pose=True):
                 for shape_key in mesh.data.shape_keys.key_blocks:
                     shape_key.value = 0
 
-    bpy.ops.wm.tool_set_by_id(name="builtin.select_box")
+    try:
+        bpy.ops.wm.tool_set_by_id(name="builtin.select_box")
+    except RuntimeError as e:
+        print('Cats stop_pose_mode: tool_set_by_id skipped:', e)
 
     Eyetracking.eye_left = None
 
@@ -353,54 +391,323 @@ class PoseToRest(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
+        # The Cats armature being in pose mode is the normal case, but the user may well be posing a
+        # different armature than the one picked in the Cats dropdown (very common on models where the
+        # clothing rides a second armature). Accept the active object too, and accept any armature in
+        # the view layer that currently holds a pose, so the button is never silently dead.
         armature = Common.get_armature()
-        return armature and armature.mode == 'POSE'
+        if armature and armature.mode == 'POSE':
+            return True
+        active = context.view_layer.objects.active if context.view_layer else None
+        if active and active.type == 'ARMATURE' and active.mode == 'POSE':
+            return True
+        return bool(PoseToRest.get_posed_armatures(context))
+
+    # -- helpers -------------------------------------------------------------------------------
+
+    @staticmethod
+    def is_bone_posed(pose_bone, tolerance=1e-6):
+        """True if this pose bone carries a transform relative to its rest position."""
+        m = pose_bone.matrix_basis
+        for i in range(4):
+            for j in range(4):
+                if abs(m[i][j] - (1.0 if i == j else 0.0)) > tolerance:
+                    return True
+        return False
+
+    @staticmethod
+    def count_posed_bones(armature_obj):
+        return sum(1 for pb in armature_obj.pose.bones if PoseToRest.is_bone_posed(pb))
+
+    @staticmethod
+    def get_posed_armatures(context):
+        """Every armature in the current view layer that actually holds a pose."""
+        view_layer_objs = context.view_layer.objects if context.view_layer else []
+        out = []
+        for obj in view_layer_objs:
+            if obj.type == 'ARMATURE' and obj.pose and PoseToRest.count_posed_bones(obj):
+                out.append(obj)
+        return out
+
+    @staticmethod
+    def get_bound_meshes(armature_obj, context):
+        """Meshes deformed by this armature.
+
+        The stock Cats lookup only walks object parenting, which silently misses meshes that are
+        bound by an Armature modifier without being parented (glTF/VRM/FBX imports and any manually
+        re-linked mesh). Those meshes were left un-baked while the rest pose still changed, so the
+        model looked like nothing happened at all.
+        """
+        found = []
+        seen = set()
+
+        def add(ob):
+            if ob.name not in seen and ob.type == 'MESH' and ob.data:
+                seen.add(ob.name)
+                found.append(ob)
+
+        # 1. the original parenting rule (mesh -> armature, or mesh -> something -> armature)
+        try:
+            for ob in Common.get_meshes_objects(armature_name=armature_obj.name, check=False):
+                add(ob)
+        except Exception as e:
+            print('Cats PoseToRest: parent-based mesh lookup failed:', e)
+
+        # 2. anything carrying an Armature modifier that points at this armature
+        for ob in bpy.data.objects:
+            if ob.type != 'MESH' or not ob.data:
+                continue
+            for mod in ob.modifiers:
+                if mod.type == 'ARMATURE' and mod.object == armature_obj and mod.show_viewport:
+                    add(ob)
+                    break
+
+        # Objects that are not linked into the current view layer cannot be evaluated by the
+        # depsgraph at all, so silently "baking" them would just write the un-deformed positions
+        # back. Report them instead of corrupting them.
+        in_view_layer = set()
+        if context.view_layer:
+            in_view_layer = {o.name for o in context.view_layer.objects}
+        usable = [ob for ob in found if ob.name in in_view_layer]
+        skipped = [ob.name for ob in found if ob.name not in in_view_layer]
+        return usable, skipped
+
+    @staticmethod
+    def force_evaluable(objects, context):
+        """Temporarily make objects visible/enabled so the depsgraph really evaluates them.
+
+        Returns a restore callback. `hide_viewport` on an object or on any collection holding it,
+        and `exclude` on a layer collection, all remove the object from the depsgraph. When that
+        happens `evaluated_get()` hands back the *un-deformed* mesh and the bake writes the mesh
+        back onto itself - a completely silent no-op, which is exactly what made this button look
+        broken on real models.
+        """
+        obj_state = []
+        coll_state = []
+        layer_state = []
+
+        wanted_collections = set()
+        for ob in objects:
+            for coll in ob.users_collection:
+                wanted_collections.add(coll)
+
+        for ob in objects:
+            obj_state.append((ob, ob.hide_viewport))
+            if ob.hide_viewport:
+                ob.hide_viewport = False
+
+        for coll in bpy.data.collections:
+            if coll in wanted_collections and coll.hide_viewport:
+                coll_state.append((coll, True))
+                coll.hide_viewport = False
+
+        def walk(layer_coll):
+            if layer_coll.collection in wanted_collections:
+                # Deliberately NOT touching `exclude`: un-excluding a layer collection destroys the
+                # per-object hide state inside it and cannot be restored faithfully. Meshes in an
+                # excluded collection are reported to the user instead.
+                if layer_coll.hide_viewport:
+                    layer_state.append((layer_coll, 'hide_viewport', True))
+                    layer_coll.hide_viewport = False
+            for child in layer_coll.children:
+                walk(child)
+
+        if context.view_layer:
+            try:
+                walk(context.view_layer.layer_collection)
+            except Exception as e:
+                print('Cats PoseToRest: could not unhide layer collections:', e)
+
+        def restore():
+            for layer_coll, attr, val in reversed(layer_state):
+                try:
+                    setattr(layer_coll, attr, val)
+                except Exception:
+                    pass
+            for coll, val in coll_state:
+                try:
+                    coll.hide_viewport = val
+                except Exception:
+                    pass
+            for ob, val in obj_state:
+                try:
+                    ob.hide_viewport = val
+                except Exception:
+                    pass
+
+        return restore
+
+    @staticmethod
+    def make_single_user(mesh_obj):
+        """Mesh data shared by several objects cannot be baked - writing it would move every user."""
+        if mesh_obj.data.users > 1:
+            mesh_obj.data = mesh_obj.data.copy()
+            return True
+        return False
+
+    @staticmethod
+    def apply_rest_pose_to_armature(armature_obj, context):
+        """Run pose.armature_apply on armature_obj, making it genuinely active first.
+
+        A bare context override does not work here: Blender resolves the armatures to operate on
+        from the view layer's real active object, so overriding only `active_object` made the
+        operator report success while doing nothing whenever some other object was active.
+        """
+        view_layer = context.view_layer
+        previous_active = view_layer.objects.active
+        previous_mode = armature_obj.mode
+        was_hidden = armature_obj.hide_get() if armature_obj.name in view_layer.objects else False
+
+        before = [tuple(round(v, 6) for row in b.matrix_local for v in row)
+                  for b in armature_obj.data.bones]
+        try:
+            if was_hidden:
+                armature_obj.hide_set(False)
+            armature_obj.hide_viewport = False
+            if previous_active is not None and previous_active.mode != 'OBJECT':
+                try:
+                    Common.switch('OBJECT')
+                except Exception:
+                    pass
+            view_layer.objects.active = armature_obj
+            armature_obj.select_set(True)
+            bpy.ops.object.mode_set(mode='POSE')
+            bpy.ops.pose.armature_apply(selected=False)
+            bpy.ops.object.mode_set(mode='OBJECT')
+        finally:
+            if was_hidden:
+                try:
+                    armature_obj.hide_set(True)
+                except Exception:
+                    pass
+
+        after = [tuple(round(v, 6) for row in b.matrix_local for v in row)
+                 for b in armature_obj.data.bones]
+        return before != after
+
+    # -- main ----------------------------------------------------------------------------------
 
     def execute(self, context):
         saved_data = Common.SavedData()
 
-        armature_obj = Common.get_armature()
-        mesh_objs = Common.get_meshes_objects(armature_name=armature_obj.name)
-        for mesh_obj in mesh_objs:
-            me = mesh_obj.data
-            if me:
-                if me.shape_keys and me.shape_keys.key_blocks:
-                    # The mesh has shape keys
-                    shape_keys = me.shape_keys
-                    key_blocks = shape_keys.key_blocks
-                    if len(key_blocks) == 1:
-                        # The mesh only has a basis shape key, so we can remove it and then add it back afterwards
-                        # Get basis shape key
-                        basis_shape_key = key_blocks[0]
-                        # Save the name of the basis shape key
-                        original_basis_name = basis_shape_key.name
-                        # Remove the basis shape key so there are now no shape keys
-                        mesh_obj.shape_key_remove(basis_shape_key)
-                        # Apply the pose to the mesh
-                        PoseToRest.apply_armature_to_mesh_with_no_shape_keys(armature_obj, mesh_obj)
-                        # Add the basis shape key back with the same name as before
-                        mesh_obj.shape_key_add(name=original_basis_name)
-                    else:
-                        # Apply the pose to the mesh, taking into account the shape keys
-                        PoseToRest.apply_armature_to_mesh_with_shape_keys(armature_obj, mesh_obj, context.scene)
-                else:
-                    # The mesh doesn't have shape keys, so we can easily apply the pose to the mesh
-                    PoseToRest.apply_armature_to_mesh_with_no_shape_keys(armature_obj, mesh_obj)
-        # Once the mesh and shape keys (if any) have been applied, the last step is to apply the current pose of the
-        # bones as the new rest pose.
-        #
-        # From the poll function, armature_obj must already be in pose mode, but it's possible it might not be the
-        # active object e.g., the user has multiple armatures opened in pose mode, but a different armature is currently
-        # active. We can use an operator override to tell the operator to treat armature_obj as if it's the active
-        # object even if it's not, skipping the need to actually set armature_obj as the active object.
-        Common.op_override(bpy.ops.pose.armature_apply, {'active_object': armature_obj})
+        # Preferred targets: the armature picked in Cats and the active object.
+        chosen = []
+        primary = Common.get_armature()
+        if primary is not None and primary.type == 'ARMATURE':
+            chosen.append(primary)
+        active = context.view_layer.objects.active if context.view_layer else None
+        if active is not None and active.type == 'ARMATURE' and active not in chosen:
+            chosen.append(active)
+        chosen = [a for a in chosen
+                  if context.view_layer is None or a.name in context.view_layer.objects]
 
-        # Stop pose mode after operation
-        bpy.ops.cats_manual.stop_pose_mode()
+        if not chosen and not PoseToRest.get_posed_armatures(context):
+            self.report({'ERROR'}, 'Cats: no armature found to apply a pose to.')
+            return {'CANCELLED'}
+
+        targets = [a for a in chosen if PoseToRest.count_posed_bones(a)]
+        fallback_note = ''
+        if not targets:
+            # The chosen armature holds no pose at all. On multi-armature models (body + clothing)
+            # the pose the user actually made very often lives on a different armature than the one
+            # in the Cats dropdown - applying only the chosen one is what made this button look
+            # like it silently did nothing. Fall back to whatever really is posed, and say so.
+            targets = PoseToRest.get_posed_armatures(context)
+            if targets:
+                fallback_note = (' NOTE: %s had no pose, so the pose on %s was applied instead.'
+                                 % (', '.join(a.name for a in chosen) or 'the selected armature',
+                                    ', '.join(a.name for a in targets)))
+
+        if not targets:
+            self.report({'WARNING'},
+                        'Cats: no bones are posed on %s, so there is nothing to apply. '
+                        'Pose the bones first, or pick the armature you actually posed.'
+                        % (', '.join(a.name for a in chosen) or 'any armature'))
+            return {'CANCELLED'}
+
+        posed_total = sum(PoseToRest.count_posed_bones(a) for a in targets)
+        also_posed = [a.name for a in PoseToRest.get_posed_armatures(context) if a not in targets]
+
+        baked = 0
+        skipped_all = []
+        unlinked_all = []
+        singled = []
+        failed_armatures = []
+
+        for armature_obj in targets:
+            mesh_objs, unlinked = PoseToRest.get_bound_meshes(armature_obj, context)
+            unlinked_all.extend(unlinked)
+
+            restore_visibility = PoseToRest.force_evaluable(mesh_objs + [armature_obj], context)
+            try:
+                # Force a depsgraph rebuild so the objects we just re-enabled are actually evaluated.
+                context.view_layer.update()
+                for mesh_obj in mesh_objs:
+                    me = mesh_obj.data
+                    if not me:
+                        continue
+                    try:
+                        if PoseToRest.make_single_user(mesh_obj):
+                            singled.append(mesh_obj.name)
+                            me = mesh_obj.data
+                        if me.shape_keys and me.shape_keys.key_blocks:
+                            key_blocks = me.shape_keys.key_blocks
+                            if len(key_blocks) == 1:
+                                # Only a basis key: drop it, bake, then put it back by name.
+                                basis_shape_key = key_blocks[0]
+                                original_basis_name = basis_shape_key.name
+                                mesh_obj.shape_key_remove(basis_shape_key)
+                                PoseToRest.apply_armature_to_mesh_with_no_shape_keys(
+                                    armature_obj, mesh_obj)
+                                mesh_obj.shape_key_add(name=original_basis_name)
+                            else:
+                                PoseToRest.apply_armature_to_mesh_with_shape_keys(
+                                    armature_obj, mesh_obj, context.scene)
+                        else:
+                            PoseToRest.apply_armature_to_mesh_with_no_shape_keys(
+                                armature_obj, mesh_obj)
+                        baked += 1
+                    except Exception as e:
+                        print('Cats PoseToRest: failed on mesh %r: %s' % (mesh_obj.name, e))
+                        skipped_all.append('%s (%s)' % (mesh_obj.name, e))
+
+                # With the meshes baked, make the current pose the new rest pose.
+                if not PoseToRest.apply_rest_pose_to_armature(armature_obj, context):
+                    failed_armatures.append(armature_obj.name)
+            finally:
+                restore_visibility()
+
+        # Stop pose mode after operation. This is cosmetic - never let it undo the work above.
+        try:
+            bpy.ops.cats_manual.stop_pose_mode()
+        except Exception as e:
+            print('Cats PoseToRest: stop_pose_mode failed (harmless):', e)
 
         saved_data.load(hide_only=True)
 
-        self.report({'INFO'}, t('PoseToRest.success'))
+        if failed_armatures:
+            self.report({'ERROR'},
+                        'Cats: the rest pose did NOT change on %s. Nothing was applied there.'
+                        % ', '.join(failed_armatures))
+            return {'CANCELLED'}
+
+        msg = '%s (%s: %d bones, %d meshes)' % (
+            t('PoseToRest.success'),
+            ', '.join(a.name for a in targets),
+            posed_total, baked)
+        msg += fallback_note
+        if also_posed:
+            msg += (' | %s is also posed but was NOT applied - select it in Cats and run this'
+                    ' again if you want it baked too.' % ', '.join(also_posed[:4]))
+        if singled:
+            msg += ' | copied shared mesh data: %s' % ', '.join(singled[:4])
+        if unlinked_all:
+            msg += (' | SKIPPED, not in this view layer (their collection is excluded): %s'
+                    % ', '.join(unlinked_all[:4]))
+        if skipped_all:
+            msg += ' | FAILED: %s' % '; '.join(skipped_all[:3])
+        noisy = bool(skipped_all or unlinked_all or fallback_note or also_posed)
+        self.report({'WARNING'} if noisy else {'INFO'}, msg)
         return {'FINISHED'}
 
     @staticmethod
@@ -414,8 +721,61 @@ class PoseToRest(bpy.types.Operator):
         context_override = {'object': mesh_obj}
         # Moving the modifier to the first index will prevent an Info message about the applied modifier not being
         # first and potentially having unexpected results.
-        Common.op_override(bpy.ops.object.modifier_move_to_index, context_override, modifier=mod_name, index=0)
-        Common.op_override(bpy.ops.object.modifier_apply, context_override, modifier=mod_name)
+        try:
+            Common.op_override(bpy.ops.object.modifier_move_to_index, context_override,
+                               modifier=mod_name, index=0)
+            Common.op_override(bpy.ops.object.modifier_apply, context_override, modifier=mod_name)
+        except Exception as e:
+            # modifier_apply is picky about context (mode, multi-user data, linked libraries). Fall
+            # back to the depsgraph bake, which needs no operator context at all.
+            print('Cats PoseToRest: modifier_apply fell back to depsgraph bake on %r: %s'
+                  % (mesh_obj.name, e))
+            if armature_mod.name in [m.name for m in mesh_obj.modifiers]:
+                mesh_obj.modifiers.remove(armature_mod)
+            PoseToRest.bake_armature_into_vertices(armature_obj, mesh_obj)
+
+    @staticmethod
+    def bake_armature_into_vertices(armature_obj, mesh_obj):
+        """Write the armature-deformed positions straight onto the mesh vertices."""
+        me = mesh_obj.data
+        mods_to_reenable_viewport = []
+        for mod in mesh_obj.modifiers:
+            if mod.show_viewport:
+                mod.show_viewport = False
+                mods_to_reenable_viewport.append(mod)
+        armature_mod = mesh_obj.modifiers.new('PoseToRest', 'ARMATURE')
+        armature_mod.object = armature_obj
+        try:
+            cos = PoseToRest.evaluated_vertex_cos(mesh_obj, len(me.vertices))
+            if cos is not None:
+                me.vertices.foreach_set('co', cos)
+                me.update()
+        finally:
+            mesh_obj.modifiers.remove(armature_mod)
+            for mod in mods_to_reenable_viewport:
+                mod.show_viewport = True
+
+    @staticmethod
+    def evaluated_vertex_cos(mesh_obj, expected_vert_count, out=None):
+        """Vertex positions of mesh_obj after modifier/shape-key evaluation, or None if unusable.
+
+        Returns None when the depsgraph hands back a mesh with a different vertex count (some
+        modifier is still generating geometry) - writing that back would scramble the mesh.
+        """
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        depsgraph.update()
+        evaluated = mesh_obj.evaluated_get(depsgraph)
+        eval_mesh = evaluated.data
+        if eval_mesh is None or len(eval_mesh.vertices) != expected_vert_count:
+            print('Cats PoseToRest: %r evaluated to %s verts, expected %d - skipping'
+                  % (mesh_obj.name,
+                     'None' if eval_mesh is None else len(eval_mesh.vertices),
+                     expected_vert_count))
+            return None
+        if out is None or len(out) != expected_vert_count * 3:
+            out = np.empty(expected_vert_count * 3, dtype=np.single)
+        eval_mesh.vertices.foreach_get('co', out)
+        return out
 
     @staticmethod
     def apply_armature_to_mesh_with_shape_keys(armature_obj, mesh_obj, scene):
@@ -453,56 +813,48 @@ class PoseToRest(bpy.types.Operator):
 
         # cos are xyz positions and get flattened when using the foreach_set/foreach_get functions, so the array length
         # will be 3 times the number of vertices
-        co_length = len(me.vertices) * 3
+        vert_count = len(me.vertices)
         # We can re-use the same array over and over
-        eval_verts_cos_array = np.empty(co_length, dtype=np.single)
-        # depsgraph lets us evaluate objects and get their state after the effect of modifiers and shape keys
-        depsgraph = None
-        evaluated_mesh_obj = None
+        eval_verts_cos_array = np.empty(vert_count * 3, dtype=np.single)
 
-        def get_eval_cos_array():
-            nonlocal depsgraph
-            nonlocal evaluated_mesh_obj
-            # Get the depsgraph and evaluate the mesh if we haven't done so already
-            if depsgraph is None or evaluated_mesh_obj is None:
-                depsgraph = bpy.context.evaluated_depsgraph_get()
-                evaluated_mesh_obj = mesh_obj.evaluated_get(depsgraph)
-            else:
-                # If we already have the depsgraph and evaluated mesh, in order for the change to the active shape
-                # key to take effect, the depsgraph has to be updated
-                depsgraph.update()
-            # Get the cos of the vertices from the evaluated mesh
-            evaluated_mesh_obj.data.vertices.foreach_get('co', eval_verts_cos_array)
-            return eval_verts_cos_array
-
-        for i, shape_key in enumerate(key_blocks):
-            # As shape key pinning is enabled, when we change the active shape key, it will change the state of the mesh
-            mesh_obj.active_shape_key_index = i
-            # The cos of the vertices of the evaluated mesh include the effect of the pinned shape key and all the
-            # modifiers (in this case, only the armature modifier we added since all the other modifiers are disabled in
-            # the viewport).
-            # This combination gives the same effect as if we'd applied the armature modifier to a mesh with the same
-            # shape as the active shape key, so we can simply set the shape key to the evaluated mesh position.
-            #
-            # Get the evaluated cos
-            evaluated_cos = get_eval_cos_array()
-            # And set the shape key to those same cos
-            shape_key.data.foreach_set('co', evaluated_cos)
-            # If it's the basis shape key, we also have to set the mesh vertices to match, otherwise the two will be
-            # desynced until Edit mode has been entered and exited, which can cause odd behaviour when creating shape
-            # keys with from_mix=False or when removing all shape keys.
-            if i == 0:
-                mesh_obj.data.vertices.foreach_set('co', evaluated_cos)
-
-        # Restore temporarily changed attributes and remove the added armature modifier
-        for mod in mods_to_reenable_viewport:
-            mod.show_viewport = True
-        mesh_obj.modifiers.remove(armature_mod)
-        for shape_key, vertex_group, mute in zip(me.shape_keys.key_blocks, shape_key_vertex_groups, shape_key_mutes):
-            shape_key.vertex_group = vertex_group
-            shape_key.mute = mute
-        mesh_obj.active_shape_key_index = old_active_shape_key_index
-        mesh_obj.show_only_shape_key = old_show_only_shape_key
+        try:
+            for i, shape_key in enumerate(key_blocks):
+                # As shape key pinning is enabled, when we change the active shape key, it will change the state of
+                # the mesh
+                mesh_obj.active_shape_key_index = i
+                # The cos of the vertices of the evaluated mesh include the effect of the pinned shape key and all
+                # the modifiers (in this case, only the armature modifier we added since all the other modifiers are
+                # disabled in the viewport). This gives the same result as applying the armature modifier to a mesh
+                # shaped like the active shape key, so the shape key can simply take the evaluated positions.
+                #
+                # The evaluated object must be re-fetched after every depsgraph update: reusing a cached
+                # evaluated object can hand back stale or freed mesh data.
+                evaluated_cos = PoseToRest.evaluated_vertex_cos(
+                    mesh_obj, vert_count, out=eval_verts_cos_array)
+                if evaluated_cos is None:
+                    # Nothing usable came back (object not evaluated, or geometry-generating modifier
+                    # still active). Bail out rather than write garbage over the shape keys.
+                    raise RuntimeError('mesh could not be evaluated by the depsgraph')
+                # And set the shape key to those same cos
+                shape_key.data.foreach_set('co', evaluated_cos)
+                # If it's the basis shape key, we also have to set the mesh vertices to match, otherwise the two will
+                # be desynced until Edit mode has been entered and exited, which can cause odd behaviour when
+                # creating shape keys with from_mix=False or when removing all shape keys.
+                if i == 0:
+                    me.vertices.foreach_set('co', evaluated_cos)
+            me.update()
+        finally:
+            # Restore temporarily changed attributes and remove the added armature modifier
+            for mod in mods_to_reenable_viewport:
+                mod.show_viewport = True
+            if armature_mod.name in [m.name for m in mesh_obj.modifiers]:
+                mesh_obj.modifiers.remove(armature_mod)
+            for shape_key, vertex_group, mute in zip(me.shape_keys.key_blocks,
+                                                     shape_key_vertex_groups, shape_key_mutes):
+                shape_key.vertex_group = vertex_group
+                shape_key.mute = mute
+            mesh_obj.active_shape_key_index = old_active_shape_key_index
+            mesh_obj.show_only_shape_key = old_show_only_shape_key
 
 @register_wrap
 class JoinMeshes(bpy.types.Operator):

@@ -2,7 +2,15 @@
 
 A tool designed to shorten the steps needed to import and optimize models into VRChat.
 
-> **This is an unofficial fork** maintained for Blender 5.1 compatibility. It is not associated with the original Cats project or Team Neoneko. Do not ask for support in the original Cats Discord.
+> **This is an unofficial fork of a fork**, maintained for Blender 5.1 compatibility. It is not
+> associated with the original Cats project, Team Neoneko, or akadon. Do not ask for support in the
+> original Cats Discord.
+
+> **5.1.2 fixes "Apply as Rest Pose does nothing".** On models with more than one armature — the
+> usual body-plus-clothing setup — Cats only ever applied the pose to the armature selected in its
+> own dropdown, so a pose made on any other armature was reported as applied while nothing changed.
+> Several other silent skips are fixed too (meshes bound by modifier rather than parenting, meshes
+> hidden with the monitor icon, shared mesh data). See [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
@@ -27,7 +35,7 @@ A tool designed to shorten the steps needed to import and optimize models into V
 
 ## Installation
 
-1. Download the latest `.zip` from [Releases](https://github.com/akadon/Cats-Blender-Plugin/releases)
+1. Download the latest `.zip` from [Releases](https://github.com/alienware377/Cats-Blender-Plugin-5.1-fixes/releases)
 2. In Blender: **Edit → Preferences → Extensions → Install from Disk**
 3. Select the zip (do not extract it)
 4. Enable the extension and restart Blender
@@ -36,5 +44,9 @@ A tool designed to shorten the steps needed to import and optimize models into V
 
 Originally created by [absolute-quantum](https://github.com/absolute-quantum/cats-blender-plugin).
 Previously maintained by [Team Neoneko](https://github.com/teamneoneko/Cats-Blender-Plugin-Unofficial-).
+Blender 5.1 port by [akadon](https://github.com/akadon/Cats-Blender-Plugin); this fork adds the
+5.1.2 bug fixes listed in the changelog.
+
+Licensed under the GNU General Public License v3.0 — see [LICENSE](LICENSE).
 
 Bundled libraries: [MMD Tools](https://github.com/UuuNyaa/blender_mmd_tools), [Material Combiner](https://github.com/Grim-es/material-combiner-addon), [Immersive Scaler](https://github.com/triazo/immersive_scaler)
