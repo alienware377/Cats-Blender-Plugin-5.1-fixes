@@ -446,39 +446,49 @@ def get_github_releases(repo):
     if not data:
         return False
     
-    # Determine tag prefix based on Blender version
-    tag_prefix = ""
-    if bpy.app.version >= (5, 1) and bpy.app.version < (5, 2):
-        tag_prefix = "5.1."
+    # Only offer builds for the Blender series we are running on.
+    series = bpy.app.version[:2]
 
+    releases = []
     for version in data:
-        full_tag = version.get('tag_name')
-        
-        # If we have a tag prefix, skip versions that don't match
-        if tag_prefix and not full_tag.startswith(tag_prefix):
-            continue   
-            
-        version_tag = full_tag
-        
-        # Remove prefix if present
-        if tag_prefix and version_tag.startswith(tag_prefix):
-            version_tag = version_tag[len(tag_prefix):]
-        
-        # Normalize version_tag 
-        version_tag = version_tag.replace('-', '.')
-        if version_tag.startswith('v.'):
-            version_tag = version_tag[2:]
-        if version_tag.startswith('v'):
-            version_tag = version_tag[1:]
-        
-        # Store full tag  
-        version_list[full_tag] = [
-            version['zipball_url'],
-            version['body'],
-            version['published_at'].split('T')[0]
-        ]
+        if version.get('draft') or version.get('prerelease'):
+            continue
+        full_tag = version.get('tag_name') or ''
+        parsed = parse_version_tag(full_tag)
+        if not parsed:
+            continue
+        # A 5.1.x build is for Blender 5.1. Tags that do not state a series are accepted as-is.
+        if len(parsed) >= 2 and parsed[:2] != series:
+            continue
+        asset_url = None
+        for asset in version.get('assets') or []:
+            if (asset.get('name') or '').endswith('.zip'):
+                asset_url = asset.get('browser_download_url')
+                break
+        releases.append((parsed, full_tag, [
+            asset_url or version['zipball_url'],
+            version.get('body') or '',
+            (version.get('published_at') or 'T').split('T')[0],
+        ]))
 
-    return True
+    # Newest first, so check_for_update_available() can just look at the first entry.
+    releases.sort(key=lambda r: r[0], reverse=True)
+    for parsed, full_tag, payload in releases:
+        version_list[full_tag] = payload
+
+    return bool(version_list)
+
+
+def parse_version_tag(tag):
+    """'v5.1.2' / '5.1.2' / '5-1-2' -> (5, 1, 2). Returns () if there are no numbers."""
+    tag = (tag or '').strip().lstrip('vV').replace('-', '.').replace('_', '.')
+    parts = []
+    for chunk in tag.split('.'):
+        if chunk.isdigit():
+            parts.append(int(chunk))
+        elif parts:
+            break
+    return tuple(parts)
 
 
 def check_for_update_available():
@@ -488,16 +498,22 @@ def check_for_update_available():
     global latest_version, latest_version_str
     latest_version = []
     for version in version_list.keys():
+        parsed = parse_version_tag(version)
+        if not parsed:
+            continue
         latest_version_str = version
-        for i in version.split('.'):
-            if i.isdigit():
-                latest_version.append(int(i))
-        if latest_version:
-            break
+        latest_version = list(parsed)
+        break
 
-    # print(latest_version, '>', current_version)
-    if latest_version > current_version:
-        return True
+    if not latest_version:
+        return False
+
+    # Compare on equal length: '5.1.2' must not lose to '5.1.2.0'.
+    a, b = list(latest_version), list(current_version)
+    width = max(len(a), len(b))
+    a += [0] * (width - len(a))
+    b += [0] * (width - len(b))
+    return a > b
 
 
 def finish_update_checking(error=''):

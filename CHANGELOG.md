@@ -60,6 +60,13 @@ and changed nothing at all. Several independent causes, all of them silent.
   verification for *every* HTTPS request made by the whole Blender process, not just its own.
 - **The updater now points at this fork's releases.** It previously checked a Team Neoneko host, so
   it could offer to "update" this build onto an unrelated one and overwrite these fixes.
+- **The updater could never detect an update at all.** It compared the release tag with the prefix
+  stripped (`5.1.2` -> `2`) against a hard-coded `CATS_VERSION` of `5.1.0.0` that was never bumped,
+  so `[2] > [5, 1, 0, 0]` was always false — and its tag filter required tags to start with `5.1.`
+  while the actual tags are `v5.1.x`. Tag parsing now accepts a leading `v`, filters by Blender
+  series, sorts newest-first, prefers the attached `.zip` asset over the source zipball, and
+  compares zero-padded version tuples. `CATS_VERSION` now tracks the manifest, and `dev_branch` is
+  off for release builds so the version no longer reports itself as `-dev`.
 
 ### Verified on Blender 5.1.2
 
