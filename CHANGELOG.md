@@ -11,15 +11,15 @@ and changed nothing at all. Several independent causes, all of them silent.
 
 - **The pose was on a different armature than the one selected.** Cats only ever applied the pose
   to the armature picked in its own dropdown. Models where the clothing rides a second armature are
-  common, and the pose the user made frequently lives on that second armature — so Cats applied an
-  empty pose and reported success. It now falls back to whichever armature is genuinely posed and
+  common, and the pose is often made on that second armature, so Cats applied an empty pose and
+  reported success. It now falls back to whichever armature is actually posed and
   says which one it used. If the selected armature *is* posed, only that one is touched, and any
   other posed armature is named in the report rather than being modified behind your back.
 - **"No bones are posed" is now a warning instead of a success message.** Previously indistinguishable
   from a real apply.
 - **Meshes bound by an Armature modifier without being parented were skipped.** The mesh lookup
   walked object parenting only, so glTF/VRM/FBX imports and any manually re-linked mesh were left
-  un-baked while the rest pose still changed — which looks exactly like "nothing happened".
+  un-baked while the rest pose still changed. That looks exactly like "nothing happened".
 - **Meshes hidden with `hide_viewport` (the monitor icon), or inside a collection hidden the same
   way, were skipped.** Those objects are dropped from the depsgraph, so `evaluated_get()` returned
   *undeformed* geometry and the bake wrote the mesh back onto itself. They are now temporarily
@@ -32,8 +32,8 @@ and changed nothing at all. Several independent causes, all of them silent.
 - **`pose.armature_apply` is no longer driven by a bare context override.** Blender resolves the
   armatures to operate on from the view layer's real active object, so overriding only
   `active_object` made the operator report success while doing nothing whenever a different object
-  happened to be active. The armature is now genuinely made active first, and the result is verified
-  — if the rest pose did not actually change, that is now an error rather than a success.
+  happened to be active. The armature is now made active first, and the result is checked: if the
+  rest pose did not actually change, that is now an error rather than a success.
 - The operator reports what it did: which armature, how many bones, how many meshes, and the name
   of anything skipped.
 
@@ -48,8 +48,8 @@ and changed nothing at all. Several independent causes, all of them silent.
   and a 3D-View context; `pose.rot_clear` and `object.hide_view_clear` raised "context is incorrect"
   otherwise, which aborted whatever called them *after* the model had already been changed. Pose
   clearing now falls back to the data API when the operators cannot poll.
-- **`get_meshes_objects(visible_only=True)` skipped every other mesh** — it removed items from the
-  list it was iterating.
+- **`get_meshes_objects(visible_only=True)` skipped every other mesh**, because it removed items from
+  the list it was iterating.
 - **`get_meshes_objects(check=True)` no longer treats objects outside the view layer as corrupt.**
   They were passed to the "delete corrupted mesh" path.
 - **The shape-key bake no longer reuses a cached evaluated object** across depsgraph updates, which
@@ -62,22 +62,17 @@ and changed nothing at all. Several independent causes, all of them silent.
   it could offer to "update" this build onto an unrelated one and overwrite these fixes.
 - **The updater could never detect an update at all.** It compared the release tag with the prefix
   stripped (`5.1.2` -> `2`) against a hard-coded `CATS_VERSION` of `5.1.0.0` that was never bumped,
-  so `[2] > [5, 1, 0, 0]` was always false — and its tag filter required tags to start with `5.1.`
+  so `[2] > [5, 1, 0, 0]` was always false. Its tag filter also required tags to start with `5.1.`
   while the actual tags are `v5.1.x`. Tag parsing now accepts a leading `v`, filters by Blender
   series, sorts newest-first, prefers the attached `.zip` asset over the source zipball, and
   compares zero-padded version tuples. `CATS_VERSION` now tracks the manifest, and `dev_branch` is
   off for release builds so the version no longer reports itself as `-dev`.
 
-### Verified on Blender 5.1.2
+### Tested
 
-- 20-case edge-case matrix for Apply as Rest Pose: 19 bake correctly (was 14). The remaining case is
-  the excluded-collection one described above, which now reports rather than fails silently.
-- All 127 operators poll without raising; all panels draw without errors in Object, Pose and Edit
-  mode on a 60-object, 3-armature, 54-mesh production model.
-- Fix Model, Join Meshes, Separate by Materials/Loose Parts, Merge Weights, Generate Twist Bones,
-  Duplicate Bones, Shape Key to Basis/Prune, Combine Materials, Create Root, Visemes, Translate
-  (bones/materials/objects/shape keys), Remove Doubles, Repair Shape Keys and Pose to Shape Key all
-  still pass after the changes.
+Tested on Blender 5.1.2 with single- and multi-armature models, including a body-plus-clothing
+model with three armatures. The other main tools (Fix Model, Join Meshes, Separate, Merge Weights,
+Twist Bones, Shape Key tools, Combine Materials, Visemes, Translate, Remove Doubles) were re-checked
+after the changes.
 
-**Not verified:** undo after Apply as Rest Pose. `bpy.ops.ed.undo()` cannot be exercised from a
-script context, so this was not tested either before or after. Save your file first.
+Undo after Apply as Rest Pose has not been tested. Save your file before using it.

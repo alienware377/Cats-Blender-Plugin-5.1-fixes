@@ -6,8 +6,8 @@ A tool designed to shorten the steps needed to import and optimize models into V
 > associated with the original Cats project, Team Neoneko, or akadon. Do not ask for support in the
 > original Cats Discord.
 
-> **5.1.2 fixes "Apply as Rest Pose does nothing".** On models with more than one armature — the
-> usual body-plus-clothing setup — Cats only ever applied the pose to the armature selected in its
+> **5.1.2 fixes "Apply as Rest Pose does nothing".** On models with more than one armature (the
+> usual body-plus-clothing setup), Cats only ever applied the pose to the armature selected in its
 > own dropdown, so a pose made on any other armature was reported as applied while nothing changed.
 > Several other silent skips are fixed too (meshes bound by modifier rather than parenting, meshes
 > hidden with the monitor icon, shared mesh data). See [CHANGELOG.md](CHANGELOG.md).
@@ -47,6 +47,6 @@ Previously maintained by [Team Neoneko](https://github.com/teamneoneko/Cats-Blen
 Blender 5.1 port by [akadon](https://github.com/akadon/Cats-Blender-Plugin); this fork adds the
 5.1.2 bug fixes listed in the changelog.
 
-Licensed under the GNU General Public License v3.0 — see [LICENSE](LICENSE).
+Licensed under the GNU General Public License v3.0. See [LICENSE](LICENSE).
 
 Bundled libraries: [MMD Tools](https://github.com/UuuNyaa/blender_mmd_tools), [Material Combiner](https://github.com/Grim-es/material-combiner-addon), [Immersive Scaler](https://github.com/triazo/immersive_scaler)
