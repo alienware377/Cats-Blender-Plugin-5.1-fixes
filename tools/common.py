@@ -240,7 +240,7 @@ def in_view_layer(obj):
     """True if obj is linked into the current view layer.
 
     Objects that exist in the file but sit in no collection (or an excluded one) cannot be
-    selected, hidden or made active - every one of those calls raises. Blender files pick these up
+    selected, hidden or made active: every one of those calls raises. Blender files pick these up
     routinely (leftovers from deleted collections, appended data, backup collections), and Cats used
     to hard-crash on them mid-operation, leaving the model half-processed.
     """
@@ -808,7 +808,7 @@ def get_meshes_objects(armature_name=None, mode=0, check=True, visible_only=Fals
                     meshes.append(ob)
 
     if visible_only:
-        # Filtering must not mutate the list being iterated - doing so skips every other match.
+        # Filtering must not mutate the list being iterated, as that skips every other match.
         meshes = [mesh for mesh in meshes if not is_hidden(mesh)]
 
     # Check for broken meshes and delete them
@@ -818,8 +818,8 @@ def get_meshes_objects(armature_name=None, mode=0, check=True, visible_only=Fals
         to_remove = []
         for mesh in meshes:
             # Objects that are not linked into this view layer (e.g. their collection is excluded)
-            # cannot be made active at all. They are perfectly valid data, not corruption, so leave
-            # them alone instead of raising - or worse, deleting them.
+            # cannot be made active at all. They are valid data, not corruption, so skip them
+            # instead of raising or deleting them.
             if mesh.name not in view_layer_names:
                 continue
             selected = mesh.select_get()

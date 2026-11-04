@@ -258,9 +258,9 @@ def stop_pose_mode(reset_pose=True):
         pb.hide = False
         pb.select = True
 
-    # The pose.* operators only poll in Pose mode. This function used to assume it was always
-    # entered from Pose mode and blew up with "context is incorrect" otherwise - which aborted the
-    # whole caller (including Apply as Rest Pose) after it had already changed the model.
+    # The pose.* operators only poll in Pose mode. Calling them from any other mode raises
+    # "context is incorrect", which aborted the whole caller (including Apply as Rest Pose) after
+    # it had already changed the model.
     if reset_pose:
         if armature.mode != 'POSE':
             try:
@@ -391,10 +391,9 @@ class PoseToRest(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        # The Cats armature being in pose mode is the normal case, but the user may well be posing a
-        # different armature than the one picked in the Cats dropdown (very common on models where the
-        # clothing rides a second armature). Accept the active object too, and accept any armature in
-        # the view layer that currently holds a pose, so the button is never silently dead.
+        # Usually the Cats armature is the one in pose mode, but the posed armature can differ from
+        # the one picked in the Cats dropdown (common when clothing rides a second armature).
+        # Accept the active object too, and any armature in the view layer that holds a pose.
         armature = Common.get_armature()
         if armature and armature.mode == 'POSE':
             return True
@@ -479,8 +478,7 @@ class PoseToRest(bpy.types.Operator):
         Returns a restore callback. `hide_viewport` on an object or on any collection holding it,
         and `exclude` on a layer collection, all remove the object from the depsgraph. When that
         happens `evaluated_get()` hands back the *un-deformed* mesh and the bake writes the mesh
-        back onto itself - a completely silent no-op, which is exactly what made this button look
-        broken on real models.
+        back onto itself, so the bake becomes a silent no-op.
         """
         obj_state = []
         coll_state = []
@@ -539,7 +537,7 @@ class PoseToRest(bpy.types.Operator):
 
     @staticmethod
     def make_single_user(mesh_obj):
-        """Mesh data shared by several objects cannot be baked - writing it would move every user."""
+        """Mesh data shared by several objects cannot be baked, as writing it would move every user."""
         if mesh_obj.data.users > 1:
             mesh_obj.data = mesh_obj.data.copy()
             return True
@@ -547,7 +545,7 @@ class PoseToRest(bpy.types.Operator):
 
     @staticmethod
     def apply_rest_pose_to_armature(armature_obj, context):
-        """Run pose.armature_apply on armature_obj, making it genuinely active first.
+        """Run pose.armature_apply on armature_obj, making it the real active object first.
 
         A bare context override does not work here: Blender resolves the armatures to operate on
         from the view layer's real active object, so overriding only `active_object` made the
@@ -609,9 +607,9 @@ class PoseToRest(bpy.types.Operator):
         fallback_note = ''
         if not targets:
             # The chosen armature holds no pose at all. On multi-armature models (body + clothing)
-            # the pose the user actually made very often lives on a different armature than the one
-            # in the Cats dropdown - applying only the chosen one is what made this button look
-            # like it silently did nothing. Fall back to whatever really is posed, and say so.
+            # the pose often lives on a different armature than the one in the Cats dropdown, and
+            # applying only the chosen one would change nothing. Fall back to whatever is posed,
+            # and report it.
             targets = PoseToRest.get_posed_armatures(context)
             if targets:
                 fallback_note = (' NOTE: %s had no pose, so the pose on %s was applied instead.'
@@ -677,7 +675,7 @@ class PoseToRest(bpy.types.Operator):
             finally:
                 restore_visibility()
 
-        # Stop pose mode after operation. This is cosmetic - never let it undo the work above.
+        # Stop pose mode after operation. This is cosmetic, so a failure must not undo the work above.
         try:
             bpy.ops.cats_manual.stop_pose_mode()
         except Exception as e:
@@ -697,7 +695,7 @@ class PoseToRest(bpy.types.Operator):
             posed_total, baked)
         msg += fallback_note
         if also_posed:
-            msg += (' | %s is also posed but was NOT applied - select it in Cats and run this'
+            msg += (' | %s is also posed but was NOT applied. Select it in Cats and run this'
                     ' again if you want it baked too.' % ', '.join(also_posed[:4]))
         if singled:
             msg += ' | copied shared mesh data: %s' % ', '.join(singled[:4])
@@ -760,14 +758,14 @@ class PoseToRest(bpy.types.Operator):
         """Vertex positions of mesh_obj after modifier/shape-key evaluation, or None if unusable.
 
         Returns None when the depsgraph hands back a mesh with a different vertex count (some
-        modifier is still generating geometry) - writing that back would scramble the mesh.
+        modifier is still generating geometry), since writing that back would scramble the mesh.
         """
         depsgraph = bpy.context.evaluated_depsgraph_get()
         depsgraph.update()
         evaluated = mesh_obj.evaluated_get(depsgraph)
         eval_mesh = evaluated.data
         if eval_mesh is None or len(eval_mesh.vertices) != expected_vert_count:
-            print('Cats PoseToRest: %r evaluated to %s verts, expected %d - skipping'
+            print('Cats PoseToRest: %r evaluated to %s verts, expected %d, skipping'
                   % (mesh_obj.name,
                      'None' if eval_mesh is None else len(eval_mesh.vertices),
                      expected_vert_count))
